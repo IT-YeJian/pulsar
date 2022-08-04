@@ -106,6 +106,10 @@ Result PartitionedConsumerImpl::receive(Message& msg, int timeout) {
         unAckedMessageTrackerPtr_->add(msg.getMessageId());
         return ResultOk;
     } else {
+        lock.lock();
+        if (state_ != Ready) {
+            return ResultAlreadyClosed;
+        }
         return ResultTimeout;
     }
 }
@@ -417,8 +421,7 @@ void PartitionedConsumerImpl::messageReceived(Consumer consumer, const Message& 
         if (messages_.full()) {
             lock.unlock();
         }
-        messages_.push(msg);
-        if (messageListener_) {
+        if (messages_.push(msg) && messageListener_) {
             unAckedMessageTrackerPtr_->add(msg.getMessageId());
             listenerExecutor_->postWork(
                 std::bind(&PartitionedConsumerImpl::internalListener, shared_from_this(), consumer));
@@ -428,6 +431,9 @@ void PartitionedConsumerImpl::messageReceived(Consumer consumer, const Message& 
 
 void PartitionedConsumerImpl::failPendingReceiveCallback() {
     Message msg;
+
+    messages_.close();
+
     Lock lock(pendingReceiveMutex_);
     while (!pendingReceives_.empty()) {
         ReceiveCallback callback = pendingReceives_.front();

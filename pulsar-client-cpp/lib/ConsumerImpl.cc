@@ -406,9 +406,7 @@ void ConsumerImpl::messageReceived(const ClientConnectionPtr& cnx, const proto::
         metadata.encryption_keys_size() <= 0 || config_.getCryptoKeyReader().get() ||
         config_.getCryptoFailureAction() == ConsumerCryptoFailureAction::CONSUME;
 
-    const bool isChunkedMessage = metadata.num_chunks_from_msg() > 1 &&
-                                  config_.getConsumerType() != ConsumerType::ConsumerShared &&
-                                  config_.getConsumerType() != ConsumerType::ConsumerKeyShared;
+    const bool isChunkedMessage = metadata.num_chunks_from_msg() > 1;
     if (isMessageDecryptable && !isChunkedMessage) {
         if (!uncompressMessageIfNeeded(cnx, msg.message_id(), metadata, payload, true)) {
             // Message was discarded on decompression error
@@ -722,7 +720,10 @@ Result ConsumerImpl::fetchSingleMessageFromBroker(Message& msg) {
     sendFlowPermitsToBroker(currentCnx, 1);
 
     while (true) {
-        incomingMessages_.pop(msg);
+        if (!incomingMessages_.pop(msg)) {
+            return ResultInterrupted;
+        }
+
         {
             // Lock needed to prevent race between connectionOpened and the check "msg.impl_->cnx_ ==
             // currentCnx.get())"
@@ -787,7 +788,10 @@ Result ConsumerImpl::receiveHelper(Message& msg) {
         return fetchSingleMessageFromBroker(msg);
     }
 
-    incomingMessages_.pop(msg);
+    if (!incomingMessages_.pop(msg)) {
+        return ResultInterrupted;
+    }
+
     messageProcessed(msg);
     return ResultOk;
 }
@@ -820,6 +824,10 @@ Result ConsumerImpl::receiveHelper(Message& msg, int timeout) {
         messageProcessed(msg);
         return ResultOk;
     } else {
+        Lock lock(mutex_);
+        if (state_ != Ready) {
+            return ResultAlreadyClosed;
+        }
         return ResultTimeout;
     }
 }
@@ -998,6 +1006,7 @@ void ConsumerImpl::closeAsync(ResultCallback callback) {
 
     LOG_INFO(getName() << "Closing consumer for topic " << topic_);
     state_ = Closing;
+    incomingMessages_.close();
 
     // Flush pending grouped ACK requests.
     if (ackGroupingTrackerPtr_) {
